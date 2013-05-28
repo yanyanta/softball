@@ -203,7 +203,7 @@ gameinit = do
                     }
 
 gameend :: IO ()
-gameend = SDL.quit
+gameend = SDL.quit >> print "Over"
 
 wait :: Time -> IO Time
 wait span = do
