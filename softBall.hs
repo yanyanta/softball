@@ -1,11 +1,17 @@
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 import Graphics.UI.SDL as SDL
-import Data.List
+import Data.List as L
 import Data.Word
+import Data.Map as M
 import Data.Maybe
-import qualified Data.Map as M
+import Control.Lens
+import Debug.Trace
 
 -- | Screen informations
 cellSide = 36
@@ -17,21 +23,19 @@ scrHeight = cellSide*yCellNum+2*scrPad
 
 -- | Data declaration part
 -- | The 'State' data structure contains game state for eventLoop.
-data State = State {ctrlBalls :: CtrlBalls,
-                    heapBalls :: (HeapBalls),
-                    waitingBalls :: [CtrlBalls],
-                    outline :: Outline,
-                    frame :: Frame,
-                    flag :: StateFlag,
-                    screen :: SDL.Surface,
-                    images :: Images}
+data State = State {_ctrlBalls :: Ctrl,
+                    _heapBalls :: Heap,
+                    _waitingBalls :: [Ctrl],
+                    _outline :: Outline,
+                    _frame :: Frame,
+                    _flag :: StateFlag,
+                    _screen :: SDL.Surface,
+                    _images :: Images}
              
-type HeapBalls = M.Map Coor Ball
-
-data CtrlBalls = CtrlBalls {balls::Balls, angle::Angle}
+data Ctrl = Ctrl {_balls::Balls, _angle::Angle}
                deriving Show
 
-data Ball = Ball {coor :: Coor, kind  :: Kind}
+data Ball = Ball {_coor :: Coor, _kind  :: Kind}
       deriving (Show,Eq)
 
 data Images = Images {red  :: SDL.Surface,
@@ -51,14 +55,18 @@ data Angle = Downward | Leftward | Upward | Rightward
 data StateFlag = Control | Clear | Descent | End
                deriving (Show,Eq)
 
+-- | Type declarations
+type Balls = [Ball]
+type Ballss = [Balls]
+type Heap = M.Map Coor Kind
+type Outline = [Int] -- 0~5列目までの山の高さ
+type Coor = (Int, Int)
+type Time = Word32
+type Frame = Word
+
 -- | Class declaration part
 class Obj a where
   pos :: a -> Coor
-  x :: a -> Int
-  x = fst . pos
-  y :: a -> Int
-  y = snd . pos
-  getImage :: Images -> a -> SDL.Surface
 
 class Drawable a where
   draw :: State -> a -> IO Bool
@@ -79,62 +87,65 @@ class Circular a where
   cpred x | x == minBound = maxBound
           | otherwise     = pred x
                         
+-- | Making lenses
+$(makeLenses ''State)
+$(makeLenses ''Ball)
+$(makeLenses ''Ctrl)
+x = _1
+y = _2
+
 -- | Instance declaration
 instance Obj Ball where
-  pos = coor
-  getImage images ball =
-         case kind ball of
-           Red    -> red images
-           Blue   -> blue images
-           Green  -> green images
-           Yellow -> yellow images
+  pos = view coor
 
-instance Drawable CtrlBalls where
-  draw state (CtrlBalls {balls,..}) = mapM_ (draw state) balls >> return True
-
-instance Drawable a => Drawable (M.Map k a) where
-  draw scr heap = mapM_ (draw scr) (M.elems heap) >> return True
+instance Drawable Ctrl where
+  draw state ctrl = mapM_ (draw state) (view balls ctrl) >> return True
 
 instance Drawable Ball where
   draw state ball = SDL.blitSurface 
-                    (getImage (images state) ball)
+                    (kindToImage (view images state) (view kind ball))
                     (Just $ SDL.Rect 0 0 cellSide cellSide)
-                    (screen state)
-                    (Just $ SDL.Rect ((x ball)*cellSide+scrPad)
-                     (scrHeight-(((y ball)+1)*cellSide+scrPad))
+                    (view screen state)
+                    (Just $ SDL.Rect ((view (coor.x) ball)*cellSide+scrPad)
+                     (scrHeight-(((view (coor.y) ball)+1)*cellSide+scrPad))
                      cellSide cellSide)
+
+instance Drawable Heap where
+  draw scr heap = mapM_ (\(c,k) -> draw scr (Ball {_coor=c, _kind = k}))
+                  (M.toList heap) >> return True
 
 instance Movable Ball where
     move ball delta outline =
-      let newCoor = coor ball |+| delta in
+      let newCoor = view coor ball |+| delta in
       if movableCoor newCoor outline
-      then Just (ball {coor=newCoor}) 
+      then Just (set coor newCoor ball) 
       else Nothing
 
-instance Movable CtrlBalls where
-  move (CtrlBalls {balls, angle}) delta outline = do
-    movedBalls <- allJust $ map (\ball-> move ball delta outline) balls 
-    return (CtrlBalls {balls = movedBalls, angle})
+instance Movable Ctrl where
+  move ctrl delta outline = do
+    movedBalls <- allJust $ Prelude.map (\ball-> move ball delta outline)
+                  (view balls ctrl)
+    return (set balls movedBalls ctrl)
   
 instance Show State where
-  show state = show (ctrlBalls state) ++ " " ++ show (heapBalls state) ++ " " ++ show (outline state)
+  show state = show (view ctrlBalls state) ++ " " ++ show (view heapBalls state) ++ " " ++ show (view outline state)
 
 instance Circular Angle
 
--- | Type declarations
-type Balls = [Ball]
-type Outline = [Int] -- 0~5列目までの山の高さ
-type Coor = (Int, Int)
-type Time = Word32
-type Frame = Word
+-- | Function declarations
+kindToImage :: Images -> Kind ->SDL.Surface
+kindToImage images kind = case kind of
+  Red    -> red images
+  Blue   -> blue images
+  Green  -> green images
+  Yellow -> yellow images
 
--- | Erasetion declarations
 (|+|) :: Coor -> Coor -> Coor
 (x1,y1) |+| (x2,y2) = (x1+x2, y1+y2)
 
 inField :: Coor -> Bool
 inField (x, y)
-  | 0 <= x && x <= 5 && 0 <= y = True
+  | 0 <= x && x < xCellNum && 0 <= y = True
   | otherwise = False
 
 movableCoor :: Coor -> Outline -> Bool
@@ -142,66 +153,70 @@ movableCoor (x, y) outline
   | inField (x, y) && y >= outline !! x = True
   | otherwise = False
   
-rotate :: [Coor] -> CtrlBalls -> Outline -> CtrlBalls
-rotate dels CtrlBalls {balls = [ker, ano], angle = ang} outline =
-  let nextAno = ano {coor = coor ano |+| (dels !! fromEnum ang)}
-      nextCtrl = CtrlBalls {balls = [ker, nextAno], angle = csucc ang}
+rotate :: [Coor] -> Ctrl -> Outline -> Ctrl
+rotate dels Ctrl {_balls = [ker, ano], _angle = ang} outline =
+  let nextAno = over coor (|+| (dels !! fromEnum ang)) ano
+      nextCtrl = Ctrl {_balls = [ker, nextAno], _angle = csucc ang}
   in
-   if movableCoor (coor nextAno) outline
+   if movableCoor (view coor nextAno) outline
    then nextCtrl
    else rotate dels nextCtrl outline
-rotateR :: CtrlBalls -> Outline -> CtrlBalls
+
+rotateR :: Ctrl -> Outline -> Ctrl
 rotateR = rotate [(-1, 1), (1, 1), (1, -1), (-1, -1)]  
-rotateL :: CtrlBalls -> Outline -> CtrlBalls
+rotateL :: Ctrl -> Outline -> Ctrl
 rotateL = rotate [(1, 1), (-1, 1), (-1, -1), (1, -1)]
                 
-ctrlGen :: [CtrlBalls] -> (CtrlBalls, [CtrlBalls])
+ctrlGen :: [Ctrl] -> (Ctrl, [Ctrl])
 ctrlGen lst =
   case splitAt 1 lst of
     ([newCtrl],rest) -> (newCtrl, rest)
     _ -> error "ERROR at ctrlGen"
 
-getHeapFirst :: HeapBalls -> Maybe Ball
+elems :: [[a]] -> [a]
+elems = concat
+
+getHeapFirst :: Heap -> Maybe (Coor, Kind)
 getHeapFirst heap
   | M.null heap = Nothing
-  | otherwise   = Just . snd $ M.elemAt 0 heap
+  | otherwise   = Just $ M.elemAt 0 heap
 
-insertBallToHeap :: Ball -> HeapBalls -> HeapBalls
-insertBallToHeap ball = M.insert (coor ball) ball
+insertBallToHeap :: Ball -> Heap -> Heap
+insertBallToHeap ball = M.insert (view coor ball) (view kind ball)
 
-insertBallsToHeap :: Balls -> HeapBalls -> HeapBalls
+insertBallsToHeap :: Balls -> Heap -> Heap
 insertBallsToHeap bs heap =
-  foldr (\ball -> insertBallToHeap ball) heap bs
+  Prelude.foldr (\ball -> insertBallToHeap ball) heap bs
 
 allJust :: [Maybe a] -> Maybe [a]
 allJust lst =
-  if all isJust lst then Just $ map fromJust lst else Nothing
+  if all isJust lst then Just $ Prelude.map fromJust lst else Nothing
 
 gameinit :: IO State
 gameinit = do
        SDL.init [SDL.InitEverything]
        scr <- SDL.setVideoMode scrWidth scrHeight 32 []
        SDL.setCaption "Soft Ball" "Soft Ball"
-       let waitings = initCtrlBalls (cycle [Red,Blue,Green,Yellow,Red,Green,Blue,Yellow,Blue])
-           (initialCtrlBalls, initialWaitingBalls) = ctrlGen waitings
+       let waitings = initCtrl (cycle [Red,Blue,Green,Yellow,Red,Green,Blue,Yellow,Blue])
+           (initialCtrl, initialWaitingBalls) = ctrlGen waitings
        redBallImage <- SDL.loadBMP "./red.bmp"
        blueBallImage <- SDL.loadBMP "./blue.bmp"
        greenBallImage <- SDL.loadBMP "./green.bmp"
        yellowBallImage <- SDL.loadBMP "./yellow.bmp"
-       return State {ctrlBalls = initialCtrlBalls,
-                     heapBalls = M.empty,
-                     waitingBalls = initialWaitingBalls,
-                     frame = 0,
-                     outline = [0,0,0,0,0,0],
-                     flag = Control,
-                     screen = scr,
-                     images = Images {red = redBallImage,
-                                      blue = blueBallImage,
-                                      green = greenBallImage,
-                                      yellow = yellowBallImage
-                                     }
+       return State {_ctrlBalls = initialCtrl,
+                     _heapBalls = M.empty,
+                     _waitingBalls = initialWaitingBalls,
+                     _frame = 0,
+                     _outline = [0,0,0,0,0,0],
+                     _flag = Control,
+                     _screen = scr,
+                     _images = Images {red = redBallImage,
+                                       blue = blueBallImage,
+                                       green = greenBallImage,
+                                       yellow = yellowBallImage
+                                      }
                     }
-
+       
 gameend :: IO ()
 gameend = SDL.quit >> print "Over"
 
@@ -211,155 +226,147 @@ wait span = do
   SDL.delay span
   return (start+span)
       
-initCtrlBalls :: [Kind] -> [CtrlBalls]
-initCtrlBalls (l:r:t) =
-  CtrlBalls { balls = [Ball {coor = (3, 12), kind = l},
-                       Ball {coor = (3, 13), kind = r}],
-              angle = Upward
-            } : initCtrlBalls t
-initCtrlBalls _ = error "INIT_CTRLBALL"
+initCtrl :: [Kind] -> [Ctrl]
+initCtrl (l:r:t) =
+  Ctrl { _balls = [Ball {_coor = (3, 12), _kind = l},
+                       Ball {_coor = (3, 13), _kind = r}],
+         _angle = Upward
+       } : initCtrl t
+
+initCtrl _ = error "INIT_CTRLBALL"
 
 descent :: State -> Maybe State
 descent state = do
-  movedCtrlBalls <- move (ctrlBalls state) (0,-1) (outline state)
-  return state {ctrlBalls = movedCtrlBalls}
+  movedCtrl <- move (view ctrlBalls state) (0,-1) (view outline state)
+  return $ set ctrlBalls movedCtrl state
 
 updateOutline :: Coor -> Outline -> Outline
 updateOutline (0, y) (_:hs) = y:hs
 updateOutline (x, y) (h:hs) = h : updateOutline (x-1, y) hs
 
-createOutline :: HeapBalls -> Outline
-createOutline heap = map length (toXcolList heap)
-
-descentTillLand :: Outline -> Ball -> (Ball, Outline)
-descentTillLand outline ball =
-  let newCoor@(x,y) = (fst (coor ball),outline !! fst (coor ball)) in
-  (ball {coor = newCoor}, updateOutline (x,y+1) outline)
-
-freeFall :: State -> State
-freeFall state@(State {ctrlBalls, outline, waitingBalls, ..}) =
-  state { ctrlBalls = newCtrl, heapBalls = newHeap,
-          waitingBalls = newWaiting, outline = createOutline newHeap}
-  where
-    CtrlBalls {balls = balls@[kernel, another], angle} = ctrlBalls
-    (newCtrl, newWaiting) = ctrlGen waitingBalls
-    newHeap =
-      case angle of
-        Downward ->
-          let (ano, ol) = descentTillLand outline another 
-              (ker,  _) = descentTillLand ol      kernel
-          in insertBallsToHeap [ano,ker] heapBalls
-        Upward   ->
-          let (ker, ol) = descentTillLand outline kernel
-              (ano,  _) = descentTillLand ol      another
-          in insertBallsToHeap [ano,ker] heapBalls
-        _ -> insertBallsToHeap
-             (map (fst.descentTillLand outline) balls) heapBalls
-
-toXcolList :: M.Map Coor Ball -> [Balls]
+toXcolList :: M.Map Coor Kind -> [[Coor]]
 toXcolList heap =
-  helper 0 $ groupBy (\b1 b2 -> fst (coor b1) == fst (coor b2)) (M.elems heap)
+  helper 0 $ groupBy (\c1 c2 -> view x c1 == view x c2) (M.keys heap)
   where
-    helper :: Int -> [Balls] -> [Balls]
-    helper n balls
+    helper :: Int -> [[Coor]] -> [[Coor]]
+    helper n css
       | n == xCellNum = []
-      | otherwise = case balls of
-        lst@(hd@(h:_):t) ->
-          if fst (coor h) == n then hd : helper (n+1) t
-          else [] : helper (n+1) lst
+      | otherwise = case css of
+        ((c:t):cs) ->
+          if view x c == n then (c:t) : helper (n+1) cs
+          else [] : helper (n+1) css
         [] ->  [] : helper (n+1) []
         _ -> error "toXcolList"
 
-normalize :: HeapBalls -> HeapBalls
+createOutline :: Heap -> Outline
+createOutline heap = Prelude.map length (toXcolList heap)
+
+descentTillLand :: Outline -> Ball -> (Ball, Outline)
+descentTillLand outline ball =
+  let newCoor@(x,y) = (fst (pos ball),outline !! fst (pos ball)) in
+  (set coor newCoor ball, updateOutline (x,y+1) outline)
+
+freeFall :: State -> State
+freeFall state =
+  state { _ctrlBalls = newCtrl, _heapBalls = newHeap,
+          _waitingBalls = newWaiting, _outline = newOutline}
+  where
+    (newCtrl, newWaiting) = ctrlGen $ view waitingBalls state
+    (newHeap, newOutline) =
+      L.foldr (\b (h, o) -> let (nb, no) = descentTillLand o b
+                          in (insertBallToHeap nb h, no))
+      (view heapBalls state, view outline state)
+      (sortBy (\b1 b2 -> view (coor.y) b2 `compare` view (coor.y) b1)
+       (view balls (view ctrlBalls state)))
+
+normalize :: Heap -> Heap
 normalize heap =
   M.fromList $ 
-  concatMap (\col -> zipWith (\n b-> let c = (x b, n)
-                                     in (c,b{coor = c}))
+  concatMap (\col -> zipWith (\n c -> let newC = (view x c, n)
+                                      in (newC, heap M.! c)) -- kokojanai
                      [0, 1 .. (length col -1)] col)
   (toXcolList heap)
-
-getHeap :: Coor -> HeapBalls -> Maybe Ball
+  
+getHeap :: Coor -> Heap -> Maybe Kind
 getHeap = M.lookup
 
-nextToBall ::  HeapBalls -> Ball -> Balls
-nextToBall heap ball =
-  [nextBall|d <- [(0,-1),(-1,0),(0,1),(1,0)],
+nextToBall ::  Heap -> Coor -> Kind -> [Coor]
+nextToBall heap coor knd =
+  [nextCoor|d <- [(0,-1),(-1,0),(0,1),(1,0)],
    let
-     nextCoor = d |+| cor
-     nextBallMaybe = getHeap nextCoor heap,
-   isJust nextBallMaybe,
-   let nextBall = fromJust nextBallMaybe,
-   knd == kind nextBall]
-  where cor = coor ball
-        knd = kind ball
+     nextCoor = d |+| coor
+     nextKind = getHeap nextCoor heap,
+   isJust nextKind,
+   knd ==  fromJust nextKind]
 
-delBall :: Ball -> HeapBalls -> HeapBalls
-delBall ball heap = M.delete (coor ball) heap
+delBall :: Coor -> Heap -> Heap
+delBall coor heap = M.delete coor heap
 
-delBalls :: Balls -> HeapBalls -> HeapBalls
-delBalls balls heap = foldr delBall heap balls
+delBalls :: [Coor] -> Heap -> Heap
+delBalls balls heap = L.foldr delBall heap balls
 
-erase :: HeapBalls -> Ball -> Balls
-erase heap start =
-  let nexts = nextToBall heap start in
-  start : concatMap (erase (delBalls nexts heap)) nexts
+erase :: Heap -> Coor -> Kind -> [Coor]
+erase heap start kind =
+  let nexts = nextToBall heap start kind in
+  start : concatMap (\c -> erase (delBalls nexts heap) c kind) nexts
 
-eraseAll :: HeapBalls -> [Balls]
+eraseAll :: Heap -> [[Coor]]
 eraseAll heap =
   case getHeapFirst heap of
-    Nothing -> []
-    Just h ->
+    Nothing     -> []
+    Just (c, k) ->
       hConnection : eraseAll (delBalls hConnection heap)
       where
-        hConnection = erase (delBall h heap) h
+        hConnection = erase (delBall c heap) c k
 
 clear :: State -> Maybe State
-clear state@(State {heapBalls = heap, ..}) =
-  if null ballsTodisppear then Nothing else Just newState
+clear state =
+  if L.null ballsTodisppear then Nothing else Just newState
   where
-    connectedList = eraseAll heap
-    ballsTodisppear = concat . filter ((4<=) . length) $ connectedList
-    normalizedHeap = normalize $ delBalls ballsTodisppear heap
-    newState = state {heapBalls = normalizedHeap,
-                      outline = createOutline normalizedHeap
+    connectedList = eraseAll (view heapBalls state)
+    ballsTodisppear = concat . L.filter ((4<=) . length) $ connectedList
+    prepare = delBalls ballsTodisppear (view heapBalls state)
+    normalizedHeap = normalize $ prepare 
+    newState = state {_heapBalls = normalizedHeap,
+                      _outline = createOutline normalizedHeap
                      }
 
 defaultUpdate :: State -> State
-defaultUpdate state = state {frame = newFrame, flag = newFlag}
+defaultUpdate state = state {_frame = newFrame, _flag = newFlag}
   where
-    newFrame = frame state + 1
-    newFlag = case flag state of
+    newFrame = view frame state + 1
+    newFlag = case view flag state of
       Control
         | newFrame `mod` 10 == 0 -> Descent
         | otherwise -> Control
       x -> x
 
 overp :: State -> Bool
-overp state = 13<(outline state)!!3
+overp state = 13< view outline state !! 3
 
 drawState :: State -> IO ()
-drawState state@(State {ctrlBalls, heapBalls,screen,..}) = do
-  black <- SDL.mapRGB (SDL.surfaceGetPixelFormat screen) 0 0 0
-  SDL.fillRect screen (Just $ SDL.Rect 0 0 scrWidth scrHeight) black
-  draw state ctrlBalls
-  draw state heapBalls
-  SDL.flip screen
+drawState state = do
+  black <- SDL.mapRGB (SDL.surfaceGetPixelFormat (view screen state)) 0 0 0
+  SDL.fillRect (view screen state) (Just $ SDL.Rect 0 0 scrWidth scrHeight) black
+  draw state (view ctrlBalls state)
+  draw state (view heapBalls state)
+  SDL.flip (view screen state)
  
 main :: IO ()
 main = gameinit >>= mainLoop
 
 mainLoop :: State -> IO ()
-mainLoop state = case flag state of
+mainLoop state = case view flag state of
   End -> gameend
   Control -> checkEvent state >>= drawWaitUpdateLoop 60
   Descent -> case descent state of
-    Just state -> drawWaitUpdateLoop 60 state {flag = Control}
-    Nothing    -> drawWaitUpdateLoop 60 $ freeFall state {flag = Clear}
+    Just state -> drawWaitUpdateLoop 60 $ set flag Control state
+    Nothing    -> drawWaitUpdateLoop 60 . freeFall $ set flag  Clear state 
   Clear -> case clear state of
     Just clearedState -> drawWaitUpdateLoop 400 clearedState
     Nothing
-      | overp state -> drawWaitUpdateLoop 0 state {flag = End}
-      | otherwise -> drawWaitUpdateLoop 60 state{flag = Control}
+      | overp state -> drawWaitUpdateLoop 0 $ set flag End state
+      | otherwise -> drawWaitUpdateLoop 60 $ set flag Control state
   where
     drawWaitUpdateLoop time state =
       drawState state >> wait time >> mainLoop (defaultUpdate state)
@@ -371,10 +378,10 @@ checkEvent state = do
     case event of
       KeyUp (Keysym key _ _) ->
         case key of
-          SDLK_ESCAPE -> state {flag = End}
-          SDLK_UP -> state {ctrlBalls = rotateR (ctrlBalls state) (outline state)}
-          SDLK_LEFT -> state {ctrlBalls = moveInField (ctrlBalls state) (-1, 0) (outline state)}
-          SDLK_RIGHT -> state {ctrlBalls = moveInField (ctrlBalls state) (1, 0) (outline state)}
-          SDLK_DOWN -> freeFall state {flag = Clear}
+          SDLK_ESCAPE -> set flag End state
+          SDLK_UP -> set ctrlBalls  (rotateR (view ctrlBalls state) (view outline state)) state
+          SDLK_LEFT -> set ctrlBalls (moveInField (view ctrlBalls state) (-1, 0) (view outline state)) state
+          SDLK_RIGHT -> set ctrlBalls (moveInField (view ctrlBalls state) (1, 0) (view outline state)) state
+          SDLK_DOWN -> freeFall $ set flag Clear state
           _ -> state
       _ -> state
