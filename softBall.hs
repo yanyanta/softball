@@ -6,32 +6,56 @@
 {-# LANGUAGE FlexibleInstances #-}
 
 import Graphics.UI.SDL as SDL
-import Data.List as L
+import Data.List as L (foldr, null, filter, sortBy, groupBy)
 import Data.Word
 import Data.Map as M
 import Data.Maybe
 import Control.Lens
-import Debug.Trace
+import Data.Array.IArray as A
+import System.Random
 
 -- | Screen informations
+cellSide :: Int
 cellSide = 36
+xCellNum :: Int
 xCellNum = 6
+yCellNum :: Int
 yCellNum = 13
+interval :: Int
+interval = 15
+player1Left :: Int
+player1Left = scrPad
+player2Left :: Int
+player2Left = scrPad + cellSide*xCellNum + interval
+scrPad :: Int
 scrPad = 5
-scrWidth = cellSide*xCellNum+2*scrPad
+scrWidth :: Int
+scrWidth = 2*(cellSide*xCellNum)+interval+2*scrPad
+scrHeight :: Int
 scrHeight = cellSide*yCellNum+2*scrPad
+emptyOutline :: Outline
+emptyOutline = array (0, xCellNum) [(x, 0)| x <- [0 .. xCellNum-1]]
 
 -- | Data declaration part
 -- | The 'State' data structure contains game state for eventLoop.
-data State = State {_ctrlBalls :: Ctrl,
-                    _heapBalls :: Heap,
-                    _waitingBalls :: [Ctrl],
-                    _outline :: Outline,
-                    _frame :: Frame,
-                    _flag :: StateFlag,
-                    _screen :: SDL.Surface,
-                    _images :: Images}
+data State = State {
+  _player1 :: Player,
+  _player2 :: Player,
+  _frame :: Frame,
+  _screen :: SDL.Surface,
+  _images :: Images}
              
+data Player = Player {
+  _playerID :: PID,
+  _ctrlBalls :: Ctrl,
+  _heapBalls :: Heap,
+  _waitingBalls :: [Ctrl],
+  _outline :: Outline,
+  _flag :: StateFlag,
+  _frameSpan :: Frame}
+
+data PID = PID1 | PID2
+
 data Ctrl = Ctrl {_balls::Balls, _angle::Angle}
                deriving Show
 
@@ -41,9 +65,10 @@ data Ball = Ball {_coor :: Coor, _kind  :: Kind}
 data Images = Images {red  :: SDL.Surface,
                       blue :: SDL.Surface,
                       green:: SDL.Surface,
-                      yellow :: SDL.Surface}
+                      yellow :: SDL.Surface,
+                      purple :: SDL.Surface}
 
-data Kind = Red | Blue | Green | Yellow
+data Kind = Red | Blue | Green | Yellow | Purple
           deriving (Show,Eq, Enum, Bounded, Ord)
  
 data ArrowKey = LeftKey | DownKey | RightKey | UpKey
@@ -57,9 +82,8 @@ data StateFlag = Control | Clear | Descent | End
 
 -- | Type declarations
 type Balls = [Ball]
-type Ballss = [Balls]
 type Heap = M.Map Coor Kind
-type Outline = [Int] -- 0~5列目までの山の高さ
+type Outline = Array Int Int
 type Coor = (Int, Int)
 type Time = Word32
 type Frame = Word
@@ -69,7 +93,7 @@ class Obj a where
   pos :: a -> Coor
 
 class Drawable a where
-  draw :: State -> a -> IO Bool
+  draw :: State -> PID -> a -> IO ()
 
 class Movable a where
   move :: a -> Coor -> Outline -> Maybe a
@@ -89,6 +113,7 @@ class Circular a where
                         
 -- | Making lenses
 $(makeLenses ''State)
+$(makeLenses ''Player)
 $(makeLenses ''Ball)
 $(makeLenses ''Ctrl)
 x = _1
@@ -99,68 +124,73 @@ instance Obj Ball where
   pos = view coor
 
 instance Drawable Ctrl where
-  draw state ctrl = mapM_ (draw state) (view balls ctrl) >> return True
+  draw state pid ctrl = mapM_ (draw state pid) (view balls ctrl)
 
 instance Drawable Ball where
-  draw state ball = SDL.blitSurface 
+  draw state pid ball = SDL.blitSurface 
                     (kindToImage (view images state) (view kind ball))
                     (Just $ SDL.Rect 0 0 cellSide cellSide)
                     (view screen state)
-                    (Just $ SDL.Rect ((view (coor.x) ball)*cellSide+scrPad)
+                    (Just $ SDL.Rect ((view (coor.x) ball)*cellSide+left)
                      (scrHeight-(((view (coor.y) ball)+1)*cellSide+scrPad))
-                     cellSide cellSide)
+                     cellSide cellSide) >> return ()
+    where
+      left = case pid of
+        PID1 -> player1Left
+        PID2 -> player2Left
 
 instance Drawable Heap where
-  draw scr heap = mapM_ (\(c,k) -> draw scr (Ball {_coor=c, _kind = k}))
-                  (M.toList heap) >> return True
-
+  draw state pid heap = mapM_ (\(c,k) -> draw state pid (Ball {_coor=c,_kind = k}))
+                        (M.toList heap)
+  
 instance Movable Ball where
-    move ball delta outline =
+    move ball delta ol =
       let newCoor = view coor ball |+| delta in
-      if movableCoor newCoor outline
+      if movableCoor newCoor ol
       then Just (set coor newCoor ball) 
       else Nothing
 
 instance Movable Ctrl where
-  move ctrl delta outline = do
-    movedBalls <- allJust $ Prelude.map (\ball-> move ball delta outline)
+  move ctrl delta ol = do
+    movedBalls <- allJust $ Prelude.map (\ball-> move ball delta ol)
                   (view balls ctrl)
     return (set balls movedBalls ctrl)
-  
-instance Show State where
-  show state = show (view ctrlBalls state) ++ " " ++ show (view heapBalls state) ++ " " ++ show (view outline state)
 
 instance Circular Angle
 
 -- | Function declarations
 kindToImage :: Images -> Kind ->SDL.Surface
-kindToImage images kind = case kind of
-  Red    -> red images
-  Blue   -> blue images
-  Green  -> green images
-  Yellow -> yellow images
+kindToImage imgs knd = case knd of
+  Red    -> red imgs
+  Blue   -> blue imgs
+  Green  -> green imgs
+  Yellow -> yellow imgs
+  Purple -> purple imgs
 
 (|+|) :: Coor -> Coor -> Coor
 (x1,y1) |+| (x2,y2) = (x1+x2, y1+y2)
 
 inField :: Coor -> Bool
-inField (x, y)
-  | 0 <= x && x < xCellNum && 0 <= y = True
+inField c
+  | 0 <= view x c && view x c < xCellNum && 0 <= view y c = True
   | otherwise = False
 
 movableCoor :: Coor -> Outline -> Bool
-movableCoor (x, y) outline
-  | inField (x, y) && y >= outline !! x = True
+movableCoor c ol
+  | inField c && view y c >= ol A.! view x c = True
   | otherwise = False
   
 rotate :: [Coor] -> Ctrl -> Outline -> Ctrl
-rotate dels Ctrl {_balls = [ker, ano], _angle = ang} outline =
-  let nextAno = over coor (|+| (dels !! fromEnum ang)) ano
-      nextCtrl = Ctrl {_balls = [ker, nextAno], _angle = csucc ang}
+rotate dels ctrl ol =
+  let 
+    [ker, ano] = view balls ctrl
+    ang = view angle ctrl
+    nextAno = over coor (|+| (dels !! fromEnum ang)) ano
+    nextCtrl = Ctrl {_balls = [ker, nextAno], _angle = csucc ang}
   in
-   if movableCoor (view coor nextAno) outline
+   if movableCoor (view coor nextAno) ol
    then nextCtrl
-   else rotate dels nextCtrl outline
+   else rotate dels nextCtrl ol
 
 rotateR :: Ctrl -> Outline -> Ctrl
 rotateR = rotate [(-1, 1), (1, 1), (1, -1), (-1, -1)]  
@@ -173,9 +203,6 @@ ctrlGen lst =
     ([newCtrl],rest) -> (newCtrl, rest)
     _ -> error "ERROR at ctrlGen"
 
-elems :: [[a]] -> [a]
-elems = concat
-
 getHeapFirst :: Heap -> Maybe (Coor, Kind)
 getHeapFirst heap
   | M.null heap = Nothing
@@ -184,9 +211,9 @@ getHeapFirst heap
 insertBallToHeap :: Ball -> Heap -> Heap
 insertBallToHeap ball = M.insert (view coor ball) (view kind ball)
 
-insertBallsToHeap :: Balls -> Heap -> Heap
-insertBallsToHeap bs heap =
-  Prelude.foldr (\ball -> insertBallToHeap ball) heap bs
+-- insertBallsToHeap :: Balls -> Heap -> Heap
+-- insertBallsToHeap bs heap =
+--   Prelude.foldr (\ball -> insertBallToHeap ball) heap bs
 
 allJust :: [Maybe a] -> Maybe [a]
 allJust lst =
@@ -197,34 +224,46 @@ gameinit = do
        SDL.init [SDL.InitEverything]
        scr <- SDL.setVideoMode scrWidth scrHeight 32 []
        SDL.setCaption "Soft Ball" "Soft Ball"
-       let waitings = initCtrl (cycle [Red,Blue,Green,Yellow,Red,Green,Blue,Yellow,Blue])
+       gen <- getStdGen 
+       let waitings = initCtrl . Prelude.map toEnum $
+                      randomRs (0, fromEnum (maxBound :: Kind)) gen
            (initialCtrl, initialWaitingBalls) = ctrlGen waitings
        redBallImage <- SDL.loadBMP "./red.bmp"
        blueBallImage <- SDL.loadBMP "./blue.bmp"
        greenBallImage <- SDL.loadBMP "./green.bmp"
        yellowBallImage <- SDL.loadBMP "./yellow.bmp"
-       return State {_ctrlBalls = initialCtrl,
-                     _heapBalls = M.empty,
-                     _waitingBalls = initialWaitingBalls,
+       purpleBallImage <- SDL.loadBMP "./purple.bmp"
+       return State {_player1 = Player {_playerID = PID1,
+                                        _ctrlBalls = initialCtrl,
+                                        _heapBalls = M.empty,
+                                        _waitingBalls = initialWaitingBalls,
+                                        _outline = emptyOutline,
+                                        _flag = Control,
+                                        _frameSpan = 1},
+                     _player2 = Player {_playerID = PID2,
+                                        _ctrlBalls = initialCtrl,
+                                        _heapBalls = M.empty,
+                                        _waitingBalls = initialWaitingBalls,
+                                        _outline = emptyOutline,
+                                        _flag = Control,
+                                        _frameSpan = 1},
                      _frame = 0,
-                     _outline = [0,0,0,0,0,0],
-                     _flag = Control,
                      _screen = scr,
                      _images = Images {red = redBallImage,
                                        blue = blueBallImage,
                                        green = greenBallImage,
-                                       yellow = yellowBallImage
+                                       yellow = yellowBallImage,
+                                       purple = purpleBallImage
                                       }
                     }
        
 gameend :: IO ()
 gameend = SDL.quit >> print "Over"
 
-wait :: Time -> IO Time
-wait span = do
+wait :: IO ()
+wait = do
   start <- SDL.getTicks
-  SDL.delay span
-  return (start+span)
+  SDL.delay 17
       
 initCtrl :: [Kind] -> [Ctrl]
 initCtrl (l:r:t) =
@@ -235,14 +274,13 @@ initCtrl (l:r:t) =
 
 initCtrl _ = error "INIT_CTRLBALL"
 
-descent :: State -> Maybe State
-descent state = do
-  movedCtrl <- move (view ctrlBalls state) (0,-1) (view outline state)
-  return $ set ctrlBalls movedCtrl state
+descent :: Player -> Maybe Player
+descent player = do
+  movedCtrl <- move (view ctrlBalls player) (0,-1) (view outline player)
+  return $ set ctrlBalls movedCtrl player
 
-updateOutline :: Coor -> Outline -> Outline
-updateOutline (0, y) (_:hs) = y:hs
-updateOutline (x, y) (h:hs) = h : updateOutline (x-1, y) hs
+inc :: Array Int Int -> Int -> Array Int Int
+inc ary x = ary//[(x, ary A.! x + 1)]
 
 toXcolList :: M.Map Coor Kind -> [[Coor]]
 toXcolList heap =
@@ -259,25 +297,28 @@ toXcolList heap =
         _ -> error "toXcolList"
 
 createOutline :: Heap -> Outline
-createOutline heap = Prelude.map length (toXcolList heap)
+createOutline = M.foldrWithKey countUp emptyOutline
+  where
+    countUp :: Coor -> Kind -> Outline -> Outline
+    countUp c _ o = inc o (view x c)
 
 descentTillLand :: Outline -> Ball -> (Ball, Outline)
-descentTillLand outline ball =
-  let newCoor@(x,y) = (fst (pos ball),outline !! fst (pos ball)) in
-  (set coor newCoor ball, updateOutline (x,y+1) outline)
+descentTillLand ol ball =
+  let newCoor = (fst (pos ball),ol A.! fst (pos ball)) in
+  (set coor newCoor ball, inc ol (view x newCoor))
 
-freeFall :: State -> State
-freeFall state =
-  state { _ctrlBalls = newCtrl, _heapBalls = newHeap,
-          _waitingBalls = newWaiting, _outline = newOutline}
+freeFall :: Player -> Player
+freeFall player =
+  player { _ctrlBalls = newCtrl, _heapBalls = newHeap,
+           _waitingBalls = newWaiting, _outline = newOutline}
   where
-    (newCtrl, newWaiting) = ctrlGen $ view waitingBalls state
+    (newCtrl, newWaiting) = ctrlGen $ view waitingBalls player
     (newHeap, newOutline) =
       L.foldr (\b (h, o) -> let (nb, no) = descentTillLand o b
                           in (insertBallToHeap nb h, no))
-      (view heapBalls state, view outline state)
+      (view heapBalls player, view outline player)
       (sortBy (\b1 b2 -> view (coor.y) b2 `compare` view (coor.y) b1)
-       (view balls (view ctrlBalls state)))
+       (view balls (view ctrlBalls player)))
 
 normalize :: Heap -> Heap
 normalize heap =
@@ -290,98 +331,132 @@ normalize heap =
 getHeap :: Coor -> Heap -> Maybe Kind
 getHeap = M.lookup
 
-nextToBall ::  Heap -> Coor -> Kind -> [Coor]
-nextToBall heap coor knd =
+nextToCoor ::  Heap -> Coor -> Kind -> [Coor]
+nextToCoor heap cor knd =
   [nextCoor|d <- [(0,-1),(-1,0),(0,1),(1,0)],
    let
-     nextCoor = d |+| coor
+     nextCoor = d |+| cor
      nextKind = getHeap nextCoor heap,
    isJust nextKind,
    knd ==  fromJust nextKind]
 
-delBall :: Coor -> Heap -> Heap
-delBall coor heap = M.delete coor heap
+delCoor :: Coor -> Heap -> Heap
+delCoor cor heap = M.delete cor heap
 
-delBalls :: [Coor] -> Heap -> Heap
-delBalls balls heap = L.foldr delBall heap balls
+delCoors :: [Coor] -> Heap -> Heap
+delCoors blls heap = L.foldr delCoor heap blls
 
-erase :: Heap -> Coor -> Kind -> [Coor]
-erase heap start kind =
-  let nexts = nextToBall heap start kind in
-  start : concatMap (\c -> erase (delBalls nexts heap) c kind) nexts
+disapCoors :: Heap -> Coor -> Kind -> [Coor]
+disapCoors heap start knd =
+  let nexts = nextToCoor heap start knd in
+  start : concatMap (\c -> disapCoors (delCoors nexts heap) c knd) nexts
 
-eraseAll :: Heap -> [[Coor]]
-eraseAll heap =
+disapCoorss :: Heap -> [[Coor]]
+disapCoorss heap =
   case getHeapFirst heap of
     Nothing     -> []
     Just (c, k) ->
-      hConnection : eraseAll (delBalls hConnection heap)
+      hConnection : disapCoorss (delCoors hConnection heap)
       where
-        hConnection = erase (delBall c heap) c k
+        hConnection = disapCoors (delCoor c heap) c k
 
-clear :: State -> Maybe State
-clear state =
-  if L.null ballsTodisppear then Nothing else Just newState
+clear :: Player -> Maybe Player
+clear player =
+  if L.null coorsTodisppear then Nothing else Just newPlayer
   where
-    connectedList = eraseAll (view heapBalls state)
-    ballsTodisppear = concat . L.filter ((4<=) . length) $ connectedList
-    prepare = delBalls ballsTodisppear (view heapBalls state)
+    connectedList = disapCoorss (view heapBalls player)
+    coorsTodisppear = concat . L.filter ((4<=) . length) $ connectedList
+    prepare = delCoors coorsTodisppear (view heapBalls player)
     normalizedHeap = normalize $ prepare 
-    newState = state {_heapBalls = normalizedHeap,
+    newPlayer = player {_heapBalls = normalizedHeap,
                       _outline = createOutline normalizedHeap
                      }
 
 defaultUpdate :: State -> State
-defaultUpdate state = state {_frame = newFrame, _flag = newFlag}
+defaultUpdate state =
+  over player2 newFlag . over player1 newFlag . set frame newFrame $ state
   where
     newFrame = view frame state + 1
-    newFlag = case view flag state of
+    newFlag player = case view flag player of
       Control
-        | newFrame `mod` 10 == 0 -> Descent
-        | otherwise -> Control
-      x -> x
+        | newFrame `mod` 10 == 0 -> set flag Descent player
+        | otherwise -> player
+      _ -> player
 
-overp :: State -> Bool
-overp state = 13< view outline state !! 3
+overp :: Player -> Bool
+overp player = 13< view outline player A.! 3
 
 drawState :: State -> IO ()
 drawState state = do
   black <- SDL.mapRGB (SDL.surfaceGetPixelFormat (view screen state)) 0 0 0
   SDL.fillRect (view screen state) (Just $ SDL.Rect 0 0 scrWidth scrHeight) black
-  draw state (view ctrlBalls state)
-  draw state (view heapBalls state)
+  draw state PID1 (view (player1.ctrlBalls) state)
+  draw state PID1 (view (player1.heapBalls) state)
+  draw state PID2 (view (player2.ctrlBalls) state)
+  draw state PID2 (view (player2.heapBalls) state)
   SDL.flip (view screen state)
  
 main :: IO ()
 main = gameinit >>= mainLoop
 
 mainLoop :: State -> IO ()
-mainLoop state = case view flag state of
-  End -> gameend
-  Control -> checkEvent state >>= drawWaitUpdateLoop 60
-  Descent -> case descent state of
-    Just state -> drawWaitUpdateLoop 60 $ set flag Control state
-    Nothing    -> drawWaitUpdateLoop 60 . freeFall $ set flag  Clear state 
-  Clear -> case clear state of
-    Just clearedState -> drawWaitUpdateLoop 400 clearedState
-    Nothing
-      | overp state -> drawWaitUpdateLoop 0 $ set flag End state
-      | otherwise -> drawWaitUpdateLoop 60 $ set flag Control state
+mainLoop state =
+  if (view (player1.flag) state == End || view (player2.flag) state == End)
+  then gameend
+  else
+    checkEvent (over player2 playerLoop (over player1 playerLoop state))
+    >>= drawWaitUpdateLoop 
   where
-    drawWaitUpdateLoop time state =
-      drawState state >> wait time >> mainLoop (defaultUpdate state)
+    drawWaitUpdateLoop state =
+       wait >> drawState state >> mainLoop (defaultUpdate state)
   
+playerLoop :: Player -> Player  
+playerLoop player =
+  if view frameSpan player /= 0 
+  then over frameSpan (subtract 1) player
+  else
+    case view flag player of
+      Descent -> case descent player of
+        Just descented -> setFrameSpan 40 . set flag Control $ descented
+        Nothing    -> freeFall . setFrameSpan 10 . set flag  Clear $ player 
+      Clear -> case clear player of
+        Just clearedPlayer -> setFrameSpan 40 clearedPlayer
+        Nothing
+          | overp player -> set flag End player
+          | otherwise -> set flag Control player
+      _ -> player
+  where
+    setFrameSpan fspan player =
+      set frameSpan fspan player
+
+pidToPlayerLens pid = case pid of
+  PID1 -> player1
+  PID2 -> player2
+
 checkEvent :: State -> IO State
 checkEvent state = do
   event <- SDL.pollEvent
   return $
     case event of
       KeyUp (Keysym key _ _) ->
-        case key of
-          SDLK_ESCAPE -> set flag End state
-          SDLK_UP -> set ctrlBalls  (rotateR (view ctrlBalls state) (view outline state)) state
-          SDLK_LEFT -> set ctrlBalls (moveInField (view ctrlBalls state) (-1, 0) (view outline state)) state
-          SDLK_RIGHT -> set ctrlBalls (moveInField (view ctrlBalls state) (1, 0) (view outline state)) state
-          SDLK_DOWN -> freeFall $ set flag Clear state
-          _ -> state
+        helper PID2 key . helper PID1 key $ state
       _ -> state
+  where
+    helper pid key state =
+      let player = pidToPlayerLens pid in
+        case view (player.flag) state of
+          Clear -> state
+          _ ->
+            case key of
+              SDLK_ESCAPE -> set (player.flag) End state
+              SDLK_UP -> set ((player.ctrlBalls))
+                         (rotateR (view (player.ctrlBalls) state)
+                          (view (player.outline) state)) state
+              SDLK_LEFT -> set (player.ctrlBalls)
+                           (moveInField (view (player.ctrlBalls) state) (-1, 0)
+                            (view (player.outline) state)) state
+              SDLK_RIGHT -> set (player.ctrlBalls)
+                             (moveInField (view (player.ctrlBalls) state) (1, 0)
+                             (view (player.outline) state)) state
+              SDLK_DOWN -> over player freeFall $ set (player.flag) Clear state
+              _ -> state
