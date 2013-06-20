@@ -66,9 +66,10 @@ data Images = Images {red  :: SDL.Surface,
                       blue :: SDL.Surface,
                       green:: SDL.Surface,
                       yellow :: SDL.Surface,
-                      purple :: SDL.Surface}
+                      purple :: SDL.Surface,
+                      white :: SDL.Surface}
 
-data Kind = Red | Blue | Green | Yellow | Purple
+data Kind = Red | Blue | Green | Yellow | Purple | White
           deriving (Show,Eq, Enum, Bounded, Ord)
  
 data ArrowKey = LeftKey | DownKey | RightKey | UpKey
@@ -166,6 +167,7 @@ kindToImage imgs knd = case knd of
   Green  -> green imgs
   Yellow -> yellow imgs
   Purple -> purple imgs
+  White -> white imgs
 
 (|+|) :: Coor -> Coor -> Coor
 (x1,y1) |+| (x2,y2) = (x1+x2, y1+y2)
@@ -233,6 +235,7 @@ gameinit = do
        greenBallImage <- SDL.loadBMP "./green.bmp"
        yellowBallImage <- SDL.loadBMP "./yellow.bmp"
        purpleBallImage <- SDL.loadBMP "./purple.bmp"
+       whiteBallImage <- SDL.loadBMP "./white.bmp"
        return State {_player1 = Player {_playerID = PID1,
                                         _ctrlBalls = initialCtrl,
                                         _heapBalls = M.empty,
@@ -253,7 +256,8 @@ gameinit = do
                                        blue = blueBallImage,
                                        green = greenBallImage,
                                        yellow = yellowBallImage,
-                                       purple = purpleBallImage
+                                       purple = purpleBallImage,
+                                       white = whiteBallImage
                                       }
                     }
        
@@ -307,18 +311,22 @@ descentTillLand ol ball =
   let newCoor = (fst (pos ball),ol A.! fst (pos ball)) in
   (set coor newCoor ball, inc ol (view x newCoor))
 
-freeFall :: Player -> Player
-freeFall player =
-  player { _ctrlBalls = newCtrl, _heapBalls = newHeap,
-           _waitingBalls = newWaiting, _outline = newOutline}
-  where
-    (newCtrl, newWaiting) = ctrlGen $ view waitingBalls player
+freeFall :: Balls -> Player -> Player
+freeFall balls p =
+  let
     (newHeap, newOutline) =
       L.foldr (\b (h, o) -> let (nb, no) = descentTillLand o b
-                          in (insertBallToHeap nb h, no))
-      (view heapBalls player, view outline player)
-      (sortBy (\b1 b2 -> view (coor.y) b2 `compare` view (coor.y) b1)
-       (view balls (view ctrlBalls player)))
+                            in (insertBallToHeap nb h, no))
+      (view heapBalls p, view outline p)
+      (sortBy (\b1 b2 -> view (coor.y) b2 `compare` view (coor.y) b1) balls)
+  in
+    set outline newOutline . set heapBalls newHeap $ p
+
+freeFallCtrl :: Player -> Player
+freeFallCtrl player =
+  set waitingBalls newWaiting . set ctrlBalls newCtrl . freeFall (view (ctrlBalls.balls) player) $ player
+  where
+    (newCtrl, newWaiting) = ctrlGen $ view waitingBalls player
 
 normalize :: Heap -> Heap
 normalize heap =
@@ -418,7 +426,7 @@ playerLoop player =
     case view flag player of
       Descent -> case descent player of
         Just descented -> setFrameSpan 40 . set flag Control $ descented
-        Nothing    -> freeFall . setFrameSpan 10 . set flag  Clear $ player 
+        Nothing    -> freeFallCtrl . setFrameSpan 10 . set flag  Clear $ player 
       Clear -> case clear player of
         Just clearedPlayer -> setFrameSpan 40 clearedPlayer
         Nothing
@@ -458,5 +466,5 @@ checkEvent state = do
               SDLK_RIGHT -> set (player.ctrlBalls)
                              (moveInField (view (player.ctrlBalls) state) (1, 0)
                              (view (player.outline) state)) state
-              SDLK_DOWN -> over player freeFall $ set (player.flag) Clear state
+              SDLK_DOWN -> over player freeFallCtrl $ set (player.flag) Clear state
               _ -> state
